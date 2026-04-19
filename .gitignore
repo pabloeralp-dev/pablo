@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv/
+venv/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+bs-pricer-site/node_modules/
+
+# Build output
+bs-pricer-site/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/

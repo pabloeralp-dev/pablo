@@ -1,0 +1,22 @@
+{
+  "inputs": {
+    "spot": 100.0,
+    "strike": 100.0,
+    "vol": 0.2,
+    "rate": 0.05,
+    "time_to_expiry": 1.0,
+    "option_type": "call"
+  },
+  "pricing": {
+    "price": 10.4506,
+    "intrinsic_value": 0.0,
+    "time_value": 10.4506
+  },
+  "greeks": {
+    "delta": 0.636831,
+    "gamma": 0.018762,
+    "vega": 0.37524,
+    "theta": -0.017573,
+    "rho": 0.532325
+  }
+}
