@@ -8,8 +8,10 @@ All financial logic is imported from pricer/. This file is presentation only.
 """
 
 import datetime
+import os
 import warnings
 import numpy as np
+import requests
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.subplots as psub
@@ -428,6 +430,119 @@ colour    = CALL_BLUE if otype == "call" else PUT_RED
 tag_cls   = "bs-tag-call" if otype == "call" else "bs-tag-put"
 
 # ---------------------------------------------------------------------------
+# News helpers
+# ---------------------------------------------------------------------------
+def _sentiment_badge(score: float | None, label: str | None) -> str:
+    """Return an HTML badge string given a numeric score or a text label."""
+    if label:
+        label = label.lower()
+        if label in ("bullish", "positive"):
+            return f'<span style="font-family:{FONT_MONO};font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;padding:2px 7px;border-radius:1px;background:{_rgba(ACCENT_TEAL,0.15)};color:{ACCENT_TEAL};border:1px solid {_rgba(ACCENT_TEAL,0.35)};">BULL</span>'
+        if label in ("bearish", "negative"):
+            return f'<span style="font-family:{FONT_MONO};font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;padding:2px 7px;border-radius:1px;background:{_rgba(PUT_RED,0.15)};color:{PUT_RED};border:1px solid {_rgba(PUT_RED,0.35)};">BEAR</span>'
+    if score is not None:
+        if score > 0.15:
+            return f'<span style="font-family:{FONT_MONO};font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;padding:2px 7px;border-radius:1px;background:{_rgba(ACCENT_TEAL,0.15)};color:{ACCENT_TEAL};border:1px solid {_rgba(ACCENT_TEAL,0.35)};">BULL</span>'
+        if score < -0.15:
+            return f'<span style="font-family:{FONT_MONO};font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;padding:2px 7px;border-radius:1px;background:{_rgba(PUT_RED,0.15)};color:{PUT_RED};border:1px solid {_rgba(PUT_RED,0.35)};">BEAR</span>'
+    return f'<span style="font-family:{FONT_MONO};font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;padding:2px 7px;border-radius:1px;background:{_rgba(TEXT_MUTED,0.12)};color:{TEXT_MUTED};border:1px solid {_rgba(TEXT_MUTED,0.25)};">NEUT</span>'
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_finnhub_news(ticker: str) -> list[dict]:
+    key = os.environ.get("FINNHUB_KEY", "")
+    if not key:
+        return []
+    today = datetime.date.today()
+    week_ago = today - datetime.timedelta(days=7)
+    url = "https://finnhub.io/api/v1/company-news"
+    params = {"symbol": ticker, "from": str(week_ago), "to": str(today), "token": key}
+    try:
+        resp = requests.get(url, params=params, timeout=6)
+        resp.raise_for_status()
+        items = resp.json()[:12]
+    except Exception:
+        return []
+    results = []
+    for item in items:
+        ts = datetime.datetime.fromtimestamp(item.get("datetime", 0)).strftime("%Y-%m-%d %H:%M")
+        results.append({
+            "headline": item.get("headline", ""),
+            "source":   item.get("source", "Finnhub"),
+            "url":      item.get("url", ""),
+            "ts":       ts,
+            "score":    item.get("sentiment", {}).get("score") if isinstance(item.get("sentiment"), dict) else None,
+            "label":    None,
+        })
+    return results
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_marketaux_news(ticker: str) -> list[dict]:
+    key = os.environ.get("MARKETAUX_KEY", "")
+    if not key:
+        return []
+    url = "https://api.marketaux.com/v1/news/all"
+    params = {"symbols": ticker, "filter_entities": "true", "language": "en",
+              "api_token": key, "limit": 10}
+    try:
+        resp = requests.get(url, params=params, timeout=6)
+        resp.raise_for_status()
+        items = resp.json().get("data", [])
+    except Exception:
+        return []
+    results = []
+    for item in items:
+        ts_raw = item.get("published_at", "")
+        try:
+            ts = datetime.datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            ts = ts_raw[:16]
+        entities = item.get("entities") or []
+        sentiment_label = None
+        for ent in entities:
+            if ent.get("symbol", "").upper() == ticker.upper():
+                sentiment_label = ent.get("sentiment_score_avg")
+                break
+        score = float(sentiment_label) if sentiment_label is not None else None
+        results.append({
+            "headline": item.get("title", ""),
+            "source":   item.get("source", "Marketaux"),
+            "url":      item.get("url", ""),
+            "ts":       ts,
+            "score":    score,
+            "label":    None,
+        })
+    return results
+
+
+def _render_news(articles: list[dict]):
+    if not articles:
+        return
+    cards_html = ""
+    for a in articles:
+        badge = _sentiment_badge(a["score"], a["label"])
+        headline_html = (
+            f'<a href="{a["url"]}" target="_blank" style="color:{TEXT_PRIMARY};text-decoration:none;">'
+            f'{a["headline"]}</a>' if a["url"] else a["headline"]
+        )
+        cards_html += f"""
+        <div style="padding:10px 14px;border:1px solid {BORDER};border-radius:2px;
+                    margin-bottom:6px;background:{BG_CARD};">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;">
+            {badge}
+            <span style="font-family:{FONT_MONO};font-size:9px;color:{TEXT_MUTED};">
+              {a['source']} &nbsp;·&nbsp; {a['ts']}
+            </span>
+          </div>
+          <div style="font-family:{FONT_MONO};font-size:11px;color:{TEXT_PRIMARY};line-height:1.5;">
+            {headline_html}
+          </div>
+        </div>"""
+    st.markdown(cards_html, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 tab_pricer, tab_payoff, tab_greeks, tab_iv, tab_live, tab_surface = st.tabs([
@@ -824,6 +939,38 @@ with tab_live:
 
     except Exception as e:
         st.error(f"Could not fetch '{ticker_input}': {e}")
+
+    # ── News feed ──────────────────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="font-family:{FONT_MONO};font-size:9px;text-transform:uppercase;
+                letter-spacing:0.1em;color:{TEXT_MUTED};margin-top:28px;
+                padding-top:14px;border-top:1px solid {BORDER};margin-bottom:10px;">
+      News &amp; Sentiment — {ticker_input}
+      <span style="font-weight:400;text-transform:none;letter-spacing:0;">
+        &nbsp;· cached 60s · Finnhub + Marketaux
+      </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    finnhub_articles   = fetch_finnhub_news(ticker_input)
+    marketaux_articles = fetch_marketaux_news(ticker_input)
+    all_articles = finnhub_articles + marketaux_articles
+    all_articles.sort(key=lambda x: x["ts"], reverse=True)
+
+    if not os.environ.get("FINNHUB_KEY") and not os.environ.get("MARKETAUX_KEY"):
+        st.markdown(f"""
+        <div style="font-family:{FONT_MONO};font-size:10px;color:{TEXT_MUTED};
+                    padding:10px 14px;border:1px solid {BORDER};border-radius:2px;">
+          Set <code style="color:{TEXT_DIM};">FINNHUB_KEY</code> and/or
+          <code style="color:{TEXT_DIM};">MARKETAUX_KEY</code> environment variables to enable news.
+        </div>
+        """, unsafe_allow_html=True)
+    elif not all_articles:
+        st.caption("No recent articles found for this ticker.")
+    else:
+        news_col, _ = st.columns([2, 1])
+        with news_col:
+            _render_news(all_articles[:15])
 
 # ── Tab 6: Price Surface ───────────────────────────────────────────────────
 with tab_surface:
