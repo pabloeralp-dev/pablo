@@ -8,8 +8,10 @@ All financial logic is imported from pricer/. This file is presentation only.
 """
 
 import datetime
+import hashlib
 import os
 import warnings
+import anthropic as _anthropic
 import numpy as np
 import requests
 import streamlit as st
@@ -543,6 +545,59 @@ def _render_news(articles: list):
 
 
 # ---------------------------------------------------------------------------
+# AI analyst helpers
+# ---------------------------------------------------------------------------
+def _params_hash(spot, strike, vol_pct, rate_pct, time, otype):
+    key = f"{spot}|{strike}|{vol_pct}|{rate_pct}|{time}|{otype}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+
+def _build_analyst_prompt(spot, strike, vol, rate, time, otype, call_p, put_p, g):
+    ratio = spot / strike
+    if ratio > 1.02:
+        moneyness = "in-the-money" if otype == "call" else "out-of-the-money"
+    elif ratio < 0.98:
+        moneyness = "out-of-the-money" if otype == "call" else "in-the-money"
+    else:
+        moneyness = "at-the-money"
+    return (
+        f"Spot: ${spot:.2f}  Strike: ${strike:.2f}  Type: {otype.upper()}  "
+        f"Moneyness: {moneyness}\n"
+        f"IV: {vol*100:.2f}%  Rate: {rate*100:.2f}%  "
+        f"Expiry: {time:.3f}y ({int(time*365)} days)\n"
+        f"Call price: ${call_p:.4f}  Put price: ${put_p:.4f}\n"
+        f"Δ {g['delta']:+.4f}  Γ {g['gamma']:+.4f}  "
+        f"ν/1% {g['vega']:+.4f}  Θ/day {g['theta']:+.4f}  ρ/1% {g['rho']:+.4f}\n\n"
+        f"Write 3-4 sentences of tight analyst prose — no headers, no bullets. Cover: "
+        f"(1) moneyness and position implications, "
+        f"(2) the most significant Greek risk(s) at these values, "
+        f"(3) whether {vol*100:.1f}% IV appears cheap, expensive, or fair "
+        f"for an equity option at this tenor and moneyness."
+    )
+
+
+def _analyst_box(text, accent, cursor=False):
+    """Render a styled analyst commentary div."""
+    suffix = "▋" if cursor else ""
+    return (
+        f'<div style="font-family:{FONT_MONO};font-size:11px;color:{TEXT_PRIMARY};'
+        f'line-height:1.8;padding:14px 18px;border:1px solid {BORDER};'
+        f'border-left:3px solid {accent};background:{BG_CARD};border-radius:2px;">'
+        f'{text}{suffix}</div>'
+    )
+
+
+def _followup_box(text, cursor=False):
+    suffix = "▋" if cursor else ""
+    return (
+        f'<div style="font-family:{FONT_MONO};font-size:11px;color:{TEXT_DIM};'
+        f'line-height:1.8;padding:12px 18px;border:1px solid {BORDER};'
+        f'border-left:3px solid {TEXT_MUTED};background:{BG_CARD};border-radius:2px;">'
+        f'{text}{suffix}</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 tab_pricer, tab_payoff, tab_greeks, tab_iv, tab_live, tab_surface = st.tabs([
@@ -609,6 +664,121 @@ with tab_pricer:
         layout["showlegend"] = False
         fig.update_layout(**layout)
         st.plotly_chart(fig, use_container_width=True)
+
+    # ── AI Analyst Commentary ──────────────────────────────────────────────
+    st.markdown(f"""
+    <div style="font-family:{FONT_MONO};font-size:9px;text-transform:uppercase;
+                letter-spacing:0.1em;color:{TEXT_MUTED};margin-top:24px;
+                padding-top:14px;border-top:1px solid {BORDER};margin-bottom:10px;
+                display:flex;align-items:center;gap:12px;">
+      AI Analyst
+      <span style="text-transform:none;letter-spacing:0;color:{_rgba(TEXT_MUTED,0.6)};">
+        claude-sonnet-4-6 &nbsp;·&nbsp; streams on every parameter change
+      </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _anthr_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if not _anthr_key:
+        st.markdown(
+            f'<div style="font-family:{FONT_MONO};font-size:10px;color:{TEXT_MUTED};'
+            f'padding:10px 14px;border:1px solid {BORDER};border-radius:2px;">'
+            f'Set <code style="color:{TEXT_DIM};">ANTHROPIC_API_KEY</code> to enable AI analyst commentary.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        _call_p = black_scholes_price(spot, strike, vol, rate, time, "call")
+        _put_p  = black_scholes_price(spot, strike, vol, rate, time, "put")
+        _ctx    = _build_analyst_prompt(spot, strike, vol, rate, time, otype, _call_p, _put_p, greeks)
+        _hash   = _params_hash(spot, strike, vol_pct, rate_pct, time, otype)
+
+        if "analyst_hash" not in st.session_state:
+            st.session_state.analyst_hash = None
+        if "analyst_text" not in st.session_state:
+            st.session_state.analyst_text = ""
+        if "analyst_followups" not in st.session_state:
+            st.session_state.analyst_followups = {}
+
+        _commentary_col, _ = st.columns([2, 1])
+        with _commentary_col:
+            _box = st.empty()
+            if st.session_state.analyst_hash != _hash:
+                _full = ""
+                try:
+                    _ai = _anthropic.Anthropic(api_key=_anthr_key)
+                    with _ai.messages.stream(
+                        model="claude-sonnet-4-6",
+                        max_tokens=400,
+                        system=(
+                            "You are a senior equity derivatives analyst. "
+                            "Respond with tight, precise analyst commentary. "
+                            "No markdown, no bullet points — flowing prose only."
+                        ),
+                        messages=[{"role": "user", "content": _ctx}],
+                    ) as _stream:
+                        for _chunk in _stream.text_stream:
+                            _full += _chunk
+                            _box.markdown(_analyst_box(_full, colour, cursor=True),
+                                          unsafe_allow_html=True)
+                    _box.markdown(_analyst_box(_full, colour), unsafe_allow_html=True)
+                    st.session_state.analyst_text = _full
+                    st.session_state.analyst_hash = _hash
+                    st.session_state.analyst_followups = {}
+                except Exception as _e:
+                    _box.error(f"Analyst: {_e}")
+            else:
+                _box.markdown(_analyst_box(st.session_state.analyst_text, colour),
+                              unsafe_allow_html=True)
+
+        # Ask the analyst
+        st.markdown(f"""
+        <div style="font-family:{FONT_MONO};font-size:9px;text-transform:uppercase;
+                    letter-spacing:0.1em;color:{TEXT_MUTED};margin-top:14px;margin-bottom:6px;">
+          Ask the analyst
+        </div>
+        """, unsafe_allow_html=True)
+
+        _question = st.text_input(
+            "follow-up",
+            placeholder="e.g.  How does vega exposure change if I double the tenor?",
+            label_visibility="collapsed",
+            key="analyst_q",
+        )
+
+        if _question.strip():
+            _qhash = hashlib.md5(f"{_hash}|{_question}".encode()).hexdigest()
+            _fbox  = st.empty()
+            if _qhash not in st.session_state.analyst_followups:
+                _ftext = ""
+                try:
+                    _ai2 = _anthropic.Anthropic(api_key=_anthr_key)
+                    with _ai2.messages.stream(
+                        model="claude-sonnet-4-6",
+                        max_tokens=400,
+                        system=(
+                            "You are a senior equity derivatives analyst. "
+                            "Answer follow-up questions concisely and precisely. "
+                            "No markdown, no bullet points — flowing prose only."
+                        ),
+                        messages=[
+                            {"role": "user",      "content": _ctx},
+                            {"role": "assistant", "content": st.session_state.analyst_text or "Acknowledged."},
+                            {"role": "user",      "content": _question},
+                        ],
+                    ) as _fstream:
+                        for _fc in _fstream.text_stream:
+                            _ftext += _fc
+                            _fbox.markdown(_followup_box(_ftext, cursor=True),
+                                           unsafe_allow_html=True)
+                    _fbox.markdown(_followup_box(_ftext), unsafe_allow_html=True)
+                    st.session_state.analyst_followups[_qhash] = _ftext
+                except Exception as _e:
+                    _fbox.error(f"Analyst: {_e}")
+            else:
+                _fbox.markdown(_followup_box(st.session_state.analyst_followups[_qhash]),
+                               unsafe_allow_html=True)
 
 # ── Tab 2: Payoff ──────────────────────────────────────────────────────────
 with tab_payoff:

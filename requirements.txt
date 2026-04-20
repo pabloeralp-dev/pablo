@@ -1,6 +1,7 @@
 numpy
 scipy
 requests
+anthropic
 matplotlib
 plotly
 streamlit
