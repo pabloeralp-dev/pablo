@@ -432,7 +432,7 @@ tag_cls   = "bs-tag-call" if otype == "call" else "bs-tag-put"
 # ---------------------------------------------------------------------------
 # News helpers
 # ---------------------------------------------------------------------------
-def _sentiment_badge(score: float | None, label: str | None) -> str:
+def _sentiment_badge(score, label) -> str:
     """Return an HTML badge string given a numeric score or a text label."""
     if label:
         label = label.lower()
@@ -449,7 +449,7 @@ def _sentiment_badge(score: float | None, label: str | None) -> str:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_finnhub_news(ticker: str) -> list[dict]:
+def fetch_finnhub_news(ticker: str) -> list:
     key = os.environ.get("FINNHUB_KEY", "")
     if not key:
         return []
@@ -478,7 +478,7 @@ def fetch_finnhub_news(ticker: str) -> list[dict]:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_marketaux_news(ticker: str) -> list[dict]:
+def fetch_marketaux_news(ticker: str) -> list:
     key = os.environ.get("MARKETAUX_KEY", "")
     if not key:
         return []
@@ -516,7 +516,7 @@ def fetch_marketaux_news(ticker: str) -> list[dict]:
     return results
 
 
-def _render_news(articles: list[dict]):
+def _render_news(articles: list):
     if not articles:
         return
     cards_html = ""
